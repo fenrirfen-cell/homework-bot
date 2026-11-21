@@ -359,6 +359,48 @@ def collect(page, lp, le, start, end):
             break
         path = urlparse(nxt)._replace(scheme="", netloc="").geturl()
 
+    # Course Schedule (the calendar): due dates teachers put on the schedule.
+    path = (f"/d2l/api/le/{le}/calendar/events/myEvents/?startDateTime={api_date(start)}"
+            f"&endDateTime={api_date(end)}")
+    for _ in range(10):
+        data = api(page, path)
+        if data is None:
+            STATS["schedule_error"] = True
+            break
+        objs = data.get("Objects", data if isinstance(data, list) else [])
+        for ev in objs:
+            STATS["schedule"] = STATS.get("schedule", 0) + 1
+            due = (parse_date(ev.get("EndDateTime")) or parse_date(ev.get("StartDateTime")))
+            if not due and ev.get("EndDay"):
+                try:
+                    d = dt.date.fromisoformat(str(ev["EndDay"])[:10])
+                    due = dt.datetime(d.year, d.month, d.day, 23, 59, tzinfo=TZ)
+                except ValueError:
+                    due = None
+            if not due or not (start <= due <= end):
+                continue
+            ou = ev.get("OrgUnitId")
+            cname = names.get(ou) or short_course(ev.get("OrgUnitName") or "Class")
+            title = re.sub(r"\s*-\s*(Due|Due Date|Ends|End Date|Availability Ends)\s*$", "",
+                           ev.get("Title") or "To do", flags=re.I).strip()
+            key = (norm(cname), norm(title))
+            if key in seen:
+                continue
+            seen.add(key)
+            ent = str((ev.get("AssociatedEntity") or {}).get("AssociatedEntityType") or "").lower()
+            kind = ("Discussion" if "discussion" in ent else "Quiz" if "quiz" in ent
+                    else "Assignment" if "dropbox" in ent else "To do")
+            match = topics.get((ou, norm(title))) if kind == "Discussion" else None
+            url = ev.get("CalendarEventViewUrl") or ""
+            link = url if url.startswith("http") else (BASE + url if url.startswith("/") else f"{BASE}/d2l/home/{ou}")
+            work.append({"kind": kind, "course": cname, "title": title, "due": due, "done": False,
+                         "details": (match or {}).get("details") or clean_text(ev.get("Description")),
+                         "link": (match or {}).get("link") or link})
+        nxt = data.get("Next") if isinstance(data, dict) else None
+        if not nxt:
+            break
+        path = urlparse(nxt)._replace(scheme="", netloc="").geturl()
+
     work.sort(key=lambda w: w["due"])
     return work
 
@@ -409,7 +451,8 @@ def main():
                f"Classes: {st.get('classes', 0)}\n"
                f"Assignments: {st.get('assignments', 0)} · Quizzes: {st.get('quizzes', 0)} · "
                f"Discussions: {st.get('discussions', 0)}\n"
-               f"With NO due date set: {st.get('no_date', 0)}\n\n" +
+               f"With NO due date set: {st.get('no_date', 0)}\n"
+               f"Course Schedule items: {'could not read' if st.get('schedule_error') else st.get('schedule', 0)}\n\n" +
                ("Some without a due date:\n" + "\n".join("• " + e for e in st.get("examples", []))
                 if st.get("examples") else ""), tags=["mag"])
         notify("✅ Homework bot is working",
