@@ -217,7 +217,11 @@ def paged_items(page, path):
 
 def courses(page, lp):
     out = []
-    for it in paged_items(page, f"/d2l/api/lp/{lp}/enrollments/myenrollments/?orgUnitTypeId=3"):
+    items = paged_items(page, f"/d2l/api/lp/{lp}/enrollments/myenrollments/?orgUnitTypeId=3")
+    if not items:  # some schools use a different type id for classes
+        items = [it for it in paged_items(page, f"/d2l/api/lp/{lp}/enrollments/myenrollments/")
+                 if "course" in (((it.get("OrgUnit") or {}).get("Type") or {}).get("Code") or "").lower()]
+    for it in items:
         ou, acc = it.get("OrgUnit") or {}, it.get("Access") or {}
         if acc.get("IsActive", True) and acc.get("CanAccess", True):
             out.append({"id": ou.get("Id"), "name": ou.get("Name") or "Class"})
@@ -228,6 +232,17 @@ def short_course(name):
     # "BIO101 - Biology (Fall 2026) - Section 3" -> keep it readable
     name = re.sub(r"\s*\((Fall|Spring|Summer|Winter)[^)]*\)", "", name, flags=re.I)
     return name.strip()[:60]
+
+
+STATS = {}
+
+
+def count(kind, due, course, name):
+    STATS[kind] = STATS.get(kind, 0) + 1
+    if not due:
+        STATS["no_date"] = STATS.get("no_date", 0) + 1
+        if len(STATS.setdefault("examples", [])) < 6:
+            STATS["examples"].append(f"{course}: {name}")
 
 
 def norm(s):
@@ -241,6 +256,7 @@ def api_date(d):
 def collect(page, lp, le, start, end):
     work, topics = [], {}
     course_list = courses(page, lp)
+    STATS.update(classes=len(course_list), assignments=0, quizzes=0, discussions=0, no_date=0, examples=[])
     names = {c["id"]: short_course(c["name"]) for c in course_list}
     for c in course_list:
         ou, cname = c["id"], short_course(c["name"])
@@ -250,6 +266,7 @@ def collect(page, lp, le, start, end):
             if f.get("IsHidden"):
                 continue
             due = parse_date(f.get("DueDate")) or parse_date((f.get("Availability") or {}).get("EndDate"))
+            count("assignments", due, cname, f.get("Name"))
             if not due or not (start <= due <= end):
                 continue
             subs = api(page, f"/d2l/api/le/{le}/{ou}/dropbox/folders/{f['Id']}/submissions/mysubmissions/")
@@ -270,6 +287,7 @@ def collect(page, lp, le, start, end):
                 if q.get("IsActive") is False:
                     continue
                 due = parse_date(q.get("DueDate")) or parse_date(q.get("EndDate"))
+                count("quizzes", due, cname, q.get("Name"))
                 if not due or not (start <= due <= end):
                     continue
                 details = clean_text(q.get("Instructions")) or clean_text(q.get("Description"))
@@ -295,6 +313,7 @@ def collect(page, lp, le, start, end):
                     "link": f"{BASE}/d2l/le/{ou}/discussions/topics/{t.get('TopicId')}/View"}
                 due = (parse_date(t.get("DueDate")) or parse_date(t.get("EndDate"))
                        or parse_date(forum.get("DueDate")) or parse_date(forum.get("EndDate")))
+                count("discussions", due, cname, t.get("Name"))
                 if not due or not (start <= due <= end):
                     continue
                 work.append({"kind": "Discussion", "course": cname, "title": t.get("Name", "Discussion"),
@@ -385,6 +404,14 @@ def main():
             browser.close()
 
     if MODE == "test":
+        st = STATS
+        notify("🔎 What the bot can see",
+               f"Classes: {st.get('classes', 0)}\n"
+               f"Assignments: {st.get('assignments', 0)} · Quizzes: {st.get('quizzes', 0)} · "
+               f"Discussions: {st.get('discussions', 0)}\n"
+               f"With NO due date set: {st.get('no_date', 0)}\n\n" +
+               ("Some without a due date:\n" + "\n".join("• " + e for e in st.get("examples", []))
+                if st.get("examples") else ""), tags=["mag"])
         notify("✅ Homework bot is working",
                f"Logged in and found {len(work)} thing(s) due in the next 2 weeks "
                f"({sum(w['kind']=='Discussion' for w in work)} discussion(s)).\n\n" +
