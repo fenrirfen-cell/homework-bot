@@ -11,6 +11,7 @@ Settings come from environment variables (GitHub secrets):
   TIMEZONE              default America/New_York
 """
 import datetime as dt
+import hashlib
 import html
 import json
 import os
@@ -272,7 +273,7 @@ def collect(page, lp, le, start, end):
             subs = api(page, f"/d2l/api/le/{le}/{ou}/dropbox/folders/{f['Id']}/submissions/mysubmissions/")
             submitted = bool(subs) and any(
                 isinstance(s, dict) and (s.get("Submissions") or s.get("Status") in (1, 3)) for s in subs)
-            work.append({"kind": "Assignment", "course": cname, "title": f.get("Name", "Assignment"),
+            work.append({"id": f"a-{ou}-{f['Id']}", "kind": "Assignment", "course": cname, "title": f.get("Name", "Assignment"),
                          "due": due, "done": submitted,
                          "details": clean_text(f.get("CustomInstructions")),
                          "link": f"{BASE}/d2l/lms/dropbox/user/folder_submit_files.d2l?db={f['Id']}&ou={ou}"})
@@ -291,7 +292,7 @@ def collect(page, lp, le, start, end):
                 if not due or not (start <= due <= end):
                     continue
                 details = clean_text(q.get("Instructions")) or clean_text(q.get("Description"))
-                work.append({"kind": "Quiz", "course": cname, "title": q.get("Name", "Quiz"),
+                work.append({"id": f"q-{ou}-{q.get('QuizId')}", "kind": "Quiz", "course": cname, "title": q.get("Name", "Quiz"),
                              "due": due, "done": False, "details": details,
                              "link": f"{BASE}/d2l/lms/quizzing/user/quiz_summary.d2l?qi={q.get('QuizId')}&ou={ou}"})
             nxt = data.get("Next")
@@ -316,7 +317,7 @@ def collect(page, lp, le, start, end):
                 count("discussions", due, cname, t.get("Name"))
                 if not due or not (start <= due <= end):
                     continue
-                work.append({"kind": "Discussion", "course": cname, "title": t.get("Name", "Discussion"),
+                work.append({"id": f"d-{ou}-{t.get('TopicId')}", "kind": "Discussion", "course": cname, "title": t.get("Name", "Discussion"),
                              "due": due, "done": False, "details": details,
                              "link": f"{BASE}/d2l/le/{ou}/discussions/topics/{t.get('TopicId')}/View"})
     # Everything Brightspace itself lists as due (the same list as "Work To Do").
@@ -401,8 +402,21 @@ def collect(page, lp, le, start, end):
             break
         path = urlparse(nxt)._replace(scheme="", netloc="").geturl()
 
+    for w in work:
+        if not w.get("id"):
+            w["id"] = "x-" + hashlib.sha1(f"{w['course']}|{w['title']}|{w['due'].isoformat()}".encode()).hexdigest()[:12]
     work.sort(key=lambda w: w["due"])
     return work
+
+
+def save_list(work):
+    """Save the list for the Homework Tracker app to read."""
+    data = {"updated": NOW.isoformat(), "items": [
+        {"id": w["id"], "kind": w["kind"], "course": w["course"], "title": w["title"],
+         "due": w["due"].astimezone(dt.timezone.utc).isoformat(), "submitted": w["done"],
+         "details": w["details"], "link": w["link"]} for w in work]}
+    with open("assignments.json", "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=1)
 
 
 # ---------------------------------------------------------------- sending
@@ -437,7 +451,9 @@ def main():
                 end = NOW + dt.timedelta(days=14)
             else:
                 end = NOW + dt.timedelta(hours=48)
-            work = [w for w in collect(page, lp, le, NOW, end) if not w["done"]]
+            everything = collect(page, lp, le, NOW - dt.timedelta(days=7), NOW + dt.timedelta(days=35))
+            save_list(everything)
+            work = [w for w in everything if not w["done"] and NOW <= w["due"] <= end]
         except Exception as e:
             save_debug(page, "error")
             notify("⚠️ Homework bot had a problem", str(e)[:800], tags=["warning"], priority=4)

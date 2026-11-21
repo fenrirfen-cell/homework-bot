@@ -12,6 +12,9 @@ on:
         options: [test, daily, weekly]
         default: test
 
+permissions:
+  contents: write   # lets the bot save assignments.json for the tracker app
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -33,6 +36,12 @@ jobs:
           BRIGHTSPACE_USERNAME: ${{ secrets.BRIGHTSPACE_USERNAME }}
           BRIGHTSPACE_PASSWORD: ${{ secrets.BRIGHTSPACE_PASSWORD }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      - name: Save the list for the Homework Tracker app
+        run: |
+          git config user.name "homework-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add assignments.json
+          git diff --cached --quiet || (git commit -m "Update assignments" && git push)
       - name: Save screenshots if something went wrong
         if: failure()
         uses: actions/upload-artifact@v4
