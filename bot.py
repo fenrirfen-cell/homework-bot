@@ -230,9 +230,19 @@ def short_course(name):
     return name.strip()[:60]
 
 
+def norm(s):
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def api_date(d):
+    return d.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
 def collect(page, lp, le, start, end):
-    work = []
-    for c in courses(page, lp):
+    work, topics = [], {}
+    course_list = courses(page, lp)
+    names = {c["id"]: short_course(c["name"]) for c in course_list}
+    for c in course_list:
         ou, cname = c["id"], short_course(c["name"])
 
         # Assignments
@@ -279,13 +289,57 @@ def collect(page, lp, le, start, end):
             for t in api(page, f"/d2l/api/le/{le}/{ou}/discussions/forums/{fid}/topics/") or []:
                 if t.get("IsHidden"):
                     continue
-                due = parse_date(t.get("DueDate")) or parse_date(t.get("EndDate"))
+                details = clean_text(t.get("Description")) or clean_text(forum.get("Description"))
+                topics[(ou, norm(t.get("Name")))] = {
+                    "details": details,
+                    "link": f"{BASE}/d2l/le/{ou}/discussions/topics/{t.get('TopicId')}/View"}
+                due = (parse_date(t.get("DueDate")) or parse_date(t.get("EndDate"))
+                       or parse_date(forum.get("DueDate")) or parse_date(forum.get("EndDate")))
                 if not due or not (start <= due <= end):
                     continue
-                details = clean_text(t.get("Description")) or clean_text(forum.get("Description"))
                 work.append({"kind": "Discussion", "course": cname, "title": t.get("Name", "Discussion"),
                              "due": due, "done": False, "details": details,
                              "link": f"{BASE}/d2l/le/{ou}/discussions/topics/{t.get('TopicId')}/View"})
+    # Everything Brightspace itself lists as due (the same list as "Work To Do").
+    # This catches discussions and other items whose due date is set somewhere else,
+    # such as on the course's Content page.
+    seen = {(norm(w["course"]), norm(w["title"])) for w in work}
+    path = (f"/d2l/api/le/{le}/content/myItems/due/?startDateTime={api_date(start)}"
+            f"&endDateTime={api_date(end)}")
+    for _ in range(10):
+        data = api(page, path)
+        if not data:
+            break
+        for it in data.get("Objects", []):
+            if it.get("IsExempt"):
+                continue
+            due = parse_date(it.get("DueDate")) or parse_date(it.get("EndDate"))
+            if not due or not (start <= due <= end):
+                continue
+            ou = it.get("OrgUnitId")
+            cname = names.get(ou, "Class")
+            title = it.get("ItemName") or "To do"
+            key = (norm(cname), norm(title))
+            if key in seen:
+                continue
+            seen.add(key)
+            url = it.get("ItemUrl") or ""
+            low = url.lower()
+            kind = ("Discussion" if "discussion" in low else "Quiz" if "quiz" in low
+                    else "Assignment" if "dropbox" in low else "To do")
+            match = topics.get((ou, norm(title)))
+            if not match and kind == "Discussion":
+                match = next((v for (o, n), v in topics.items() if o == ou and (n in norm(title) or norm(title) in n) and n), None)
+            link = url if url.startswith("http") else (BASE + url if url.startswith("/") else f"{BASE}/d2l/home/{ou}")
+            work.append({"kind": kind, "course": cname, "title": title, "due": due,
+                         "done": bool(it.get("DateCompleted")),
+                         "details": (match or {}).get("details", ""),
+                         "link": (match or {}).get("link") or link})
+        nxt = data.get("Next")
+        if not nxt:
+            break
+        path = urlparse(nxt)._replace(scheme="", netloc="").geturl()
+
     work.sort(key=lambda w: w["due"])
     return work
 
@@ -332,7 +386,8 @@ def main():
 
     if MODE == "test":
         notify("✅ Homework bot is working",
-               f"Logged in and found {len(work)} thing(s) due in the next 2 weeks.\n\n" +
+               f"Logged in and found {len(work)} thing(s) due in the next 2 weeks "
+               f"({sum(w['kind']=='Discussion' for w in work)} discussion(s)).\n\n" +
                (summary_lines(work[:15]) or "Nothing due right now."), tags=["white_check_mark"])
         for w in work[:3]:
             send_item(w)
